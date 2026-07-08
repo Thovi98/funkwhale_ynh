@@ -1,305 +1,160 @@
 #!/bin/bash
 
-#=================================================
-# GENERIC START
-#=================================================
-# IMPORT GENERIC HELPERS
-#=================================================
-
-source _common.sh
 source /usr/share/yunohost/helpers
 
-#=================================================
-# LOAD SETTINGS
-#=================================================
-ynh_script_progression --message="Loading installation settings..."
+admin_mail=$(ynh_user_get_info --username="$admin" --key="mail")
 
-app=$YNH_APP_INSTANCE_NAME
-
-domain=$(ynh_app_setting_get --app=$app --key=domain)
-path_url=$(ynh_app_setting_get --app=$app --key=path)
-final_path=$(ynh_app_setting_get --app=$app --key=final_path)
-db_name=$(ynh_app_setting_get --app=$app --key=db_name)
-db_user=$db_name
-db_pwd=$(ynh_app_setting_get --app=$app --key=db_pwd)
-datadir=$(ynh_app_setting_get --app=$app --key=datadir)
-port=$(ynh_app_setting_get --app=$app --key=port)
-redis_db=$(ynh_app_setting_get --app=$app --key=redis_db)
-key=$(ynh_app_setting_get --app=$app --key=key)
-
-#=================================================
-# CHECK VERSION
-#=================================================
-ynh_script_progression --message="Checking version..."
-
-upgrade_type=$(ynh_check_app_version_changed)
-
-#=================================================
-# BACKUP BEFORE UPGRADE THEN ACTIVE TRAP
-#=================================================
-ynh_script_progression --message="Backing up the app before upgrading (may take a while)..."
-
-# Backup the current version of the app
-ynh_backup_before_upgrade
-ynh_clean_setup () {
-	# Restore it if the upgrade fails
-	ynh_clean_check_starting
-	ynh_restore_upgradebackup
-}
-# Exit if an error occurs during the execution of the script
-ynh_abort_if_errors
-
-#=================================================
-# STANDARD UPGRADE STEPS
 #=================================================
 # STOP SYSTEMD SERVICE
 #=================================================
-ynh_script_progression --message="Stopping a systemd service..."
+ynh_script_progression "Stopping $app's systemd service..."
 
-ynh_systemd_action --action="stop" --service_name="${app}-beat" --log_path="systemd" --line_match="Stopped"
-ynh_systemd_action --action="stop" --service_name="${app}-server" --log_path="systemd" --line_match="Stopped"
-ynh_systemd_action --action="stop" --service_name="${app}-worker" --log_path="systemd" --line_match="Stopped"
-
-#=================================================
-# ENSURE DOWNWARD COMPATIBILITY
-#=================================================
-ynh_script_progression --message="Ensuring downward compatibility..."
-
-# If redis_db doesn't exist, create it
-if [ -z "$redis_db" ]; then
-	redis_db=$(ynh_redis_get_free_db)
-	ynh_app_setting_set --app=$app --key=redis_db --value=$redis_db
-fi
-
-# If db_pwd doesn't exist, create it
-if [ -z "$db_pwd" ]; then
-	db_pwd=$(ynh_app_setting_get --app=$app --key=psqlpwd)
-	ynh_app_setting_set --app=$app --key=db_pwd --value=$db_pwd
-fi
-
-# Cleaning legacy permissions
-if ynh_legacy_permissions_exists; then
-	ynh_legacy_permissions_delete_all
-
-	ynh_app_setting_delete --app=$app --key=is_public
-fi
+ynh_systemctl --action="stop" --service="${app}-beat" --log_path="systemd"
+ynh_systemctl --action="stop" --service="${app}-server" --log_path="systemd"
+ynh_systemctl --action="stop" --service="${app}-worker" --log_path="systemd"
 
 #=================================================
-# MOVE DATAS
+# PREPARE A POSTGRESQL DATABASE
 #=================================================
+ynh_script_progression "Configuring the PostgreSQL database..."
 
-# If datadir doesn't exist, create it
-if [ -z "$datadir" ]; then
-	# Do a full backup before moving datas
-	yunohost backup create --apps $app
-
-	datadir="/home/yunohost.app/${app}/data"
-	ynh_script_progression --message="Moving datas to $datadir..."	
-
-	mkdir -p $datadir
-	mkdir -p $datadir/{static,media,music}
-
-	chmod 750 "$datadir"
-	chmod -R o-rwx "$datadir"
-	chown -R $app:www-data "$datadir"
-	
-	ynh_backup_if_checksum_is_different --file="$final_path/code/config/.env"
-	mkdir -p $final_path/config
-	rsync -a $final_path/code/config/ $final_path/config/
-	chmod 400 $final_path/config/.env
-	ynh_store_file_checksum --file="$final_path/config/.env"
-	ynh_delete_file_checksum --file="$final_path/code/config/.env"
-	
-	if [ -d "$final_path/code/data/static/" ]; then
-		rsync -a $final_path/code/data/static/ $datadir/static/
-	fi
-	if [ -d "$final_path/media/" ]; then
-		rsync -a $final_path/media/ $datadir/media/
-	fi
-	if [ -d "$final_path/code/data/media/" ]; then
-		rsync -a $final_path/code/data/media/ $datadir/media/
-	fi
-	if [ -d "$final_path/import/" ]; then
-		rsync -a $final_path/import/ $datadir/music/
-	fi
-	if [ -d "$final_path/code/data/music/" ]; then
-		rsync -a $final_path/code/data/music/ $datadir/music/
-	fi
-	
-	ynh_secure_remove --file="$final_path/code"
-	ynh_secure_remove --file="$final_path/media"
-	ynh_secure_remove --file="$final_path/code/data/media"
-	ynh_secure_remove --file="$final_path/import"
-	ynh_secure_remove --file="$final_path/code/data/music"
-
-	ynh_app_setting_set --app=$app --key=datadir --value=$datadir
-
-	chmod 750 "$datadir"
-	chmod -R o-rwx "$datadir"
-	chown -R $app:www-data "$datadir"
-	
-	upgrade_type="UPGRADE_APP"
-fi
-
-#=================================================
-# CREATE DEDICATED USER
-#=================================================
-ynh_script_progression --message="Making sure dedicated system user exists..."
-
-# Create a dedicated user (if not existing)
-ynh_system_user_create --username=$app --home_dir=$final_path
+ynh_psql_db_shell <<< "ALTER USER $db_user WITH SUPERUSER;"
+ynh_psql_db_shell <<< "GRANT ALL PRIVILEGES ON DATABASE $db_name TO $db_user;"
+ynh_psql_db_shell <<< "CREATE EXTENSION IF NOT EXISTS unaccent;"
+ynh_psql_db_shell <<< "CREATE EXTENSION IF NOT EXISTS citext;"
+ynh_psql_db_shell <<< "ALTER USER $db_user WITH NOSUPERUSER;"
 
 #=================================================
 # DOWNLOAD, CHECK AND UNPACK SOURCE
 #=================================================
+ynh_script_progression "Upgrading source files..."
 
-if [ "$upgrade_type" == "UPGRADE_APP" ]
+ynh_setup_source --dest_dir="$install_dir/api" --source_id="api" --full_replace
+ynh_setup_source --dest_dir="$install_dir/front" --source_id="front" --full_replace
+
+if ynh_app_upgrading_from_version_before 2.0.1~ynh1
 then
-	ynh_script_progression --message="Upgrading source files..."
-
-	ynh_secure_remove --file="$final_path/api"
-	ynh_secure_remove --file="$final_path/front"
-	# Download, check integrity, uncompress and patch the source from app.src
-	ynh_setup_source --dest_dir="$final_path/api" --source_id="api"
-	ynh_setup_source --dest_dir="$final_path/front" --source_id="front"
+	ynh_safe_rm "/etc/nginx/conf.d/$domain.d/funkwhale_proxy.conf"
 fi
-
-chmod 750 "$final_path"
-chmod -R o-rwx "$final_path"
-chown -R $app:www-data "$final_path"
 
 #=================================================
 # NGINX CONFIGURATION
 #=================================================
-ynh_script_progression --message="Upgrading NGINX web server configuration..."
+ynh_script_progression "Upgrading NGINX web server configuration..."
 
-# Create a dedicated NGINX config
-ynh_add_nginx_config
-
-#=================================================
-# UPGRADE DEPENDENCIES
-#=================================================
-ynh_script_progression --message="Upgrading dependencies..."
-
-ynh_install_app_dependencies $pkg_dependencies
+ynh_config_add_nginx
 
 #=================================================
-# SPECIFIC UPGRADE
+# Assure correct permissions to $data_dir
+#=================================================
+ynh_script_progression "Assure correct permissions to $data_dir..."
+
+chmod 750 "$data_dir"
+chmod -R o-rwx "$data_dir/"
+chown -R $app:www-data "$data_dir/"
+
 #=================================================
 # INSTALL PYTHON DEPENDENCIES
 #=================================================
-ynh_script_progression --message="Installing Python dependencies..."
+ynh_script_progression "Installing Python dependencies..."
 
-pushd $final_path
-	ynh_secure_remove --file="$final_path/virtualenv"
-	python3 -m venv $final_path/virtualenv
-	source $final_path/virtualenv/bin/activate
-	pip install --upgrade pip
-	pip install --upgrade setuptools
-	ynh_exec_warn_less pip install wheel
-	# Workaround for error AttributeError: module 'lib' has no attribute 'X509_V_FLAG_CB_ISSUER_CHECK'
-	ynh_replace_string --match_string="pyOpenSSL~=20.0.1" --replace_string="pyOpenSSL~=21.0.0" --target_file="$final_path/api/requirements/base.txt"
-	ynh_exec_warn_less pip install -r api/requirements.txt
+if [ $YNH_ARCH == "armhf" ] || [ $YNH_ARCH == "armel" ]
+then
+# Install rustup is not already installed
+# We need this to be able to install cryptgraphy
+export PATH="$PATH:$install_dir/.cargo/bin:$install_dir/.local/bin:/usr/local/sbin"
+    if [ -e $install_dir/.rustup ]; then
+    ynh_exec_as_app PATH=$PATH rustup update
+    else
+    ynh_exec_as_app bash -c 'curl -sSf -L https://static.rust-lang.org/rustup.sh | sh -s -- -y --default-toolchain=stable --profile=minimal'
+    fi
+fi
+
+pushd $install_dir
+	ynh_safe_rm "$install_dir/venv"
+
+	ynh_exec_as_app python3 -m venv $install_dir/venv
+	ynh_hide_warnings ynh_exec_as_app $install_dir/venv/bin/pip install --upgrade pip wheel toml setuptools poetry-core
+	ynh_hide_warnings ynh_exec_as_app $install_dir/venv/bin/pip install --editable ./api --no-build-isolation
 popd
 
 #=================================================
 # UPDATE A CONFIG FILE
 #=================================================
-ynh_script_progression --message="Updating a configuration file..."
+ynh_script_progression "Updating configuration..."
 
-ynh_add_config --template="../conf/env.prod" --destination="$final_path/config/.env"
-
-chmod 400 "$final_path/config/.env"
-chown $app:$app "$final_path/config/.env"
+ynh_config_add --template="env.prod" --destination="$install_dir/config/.env"
 
 #=================================================
 # UPGRADE FUNKWHALE
 #=================================================
-ynh_script_progression --message="Upgrading Funkwhale..."
+ynh_script_progression "Upgrading Funkwhale..."
 
-pushd $final_path
-	source $final_path/virtualenv/bin/activate
-
-	# needed for enabling the 'unaccent' extension
-	ynh_psql_execute_as_root --sql="ALTER USER $db_user WITH SUPERUSER;" --database="$db_name"
-	ynh_exec_warn_less python api/manage.py migrate
-	ynh_psql_execute_as_root --sql="ALTER USER $db_user WITH NOSUPERUSER;" --database="$db_name"
-
-	echo "yes" | ynh_exec_warn_less python api/manage.py collectstatic --clear --noinput
-
-	# https://code.eliotberriot.com/funkwhale/funkwhale/tags/0.16 # users-now-have-an-activitypub-actor-manual-action-required
-	# python api/manage.py script create_actors --no-input
-	# https://code.eliotberriot.com/funkwhale/funkwhale/tags/0.16 #image-thumbnails-manual-action-required
-	# python api/manage.py script create_image_variations --no-input
-
-	# https://docs.funkwhale.audio/upgrading/0.17.html#upgrade-instructions
-	# python api/manage.py script migrate_to_user_libraries --no-input
-
-	# Delete pre 0.17 federated tracks [manual action suggested]
-	# https://dev.funkwhale.audio/funkwhale/funkwhale/tags/0.18
-	# python api/manage.py script delete_pre_017_federated_uploads --no-input
-
-	# Delete the original thumbnails and generate new ones for
-	# higher quality images
-	# https://docs.funkwhale.audio/changelog.html#increased-quality-of-jpeg-thumbnails-manual-action-required
-	ynh_secure_remove --file="$final_path/media/__sized__"
-	ynh_exec_warn_less python api/manage.py fw media generate-thumbnails
+pushd $install_dir
+	ynh_hide_warnings ynh_exec_as_app $install_dir/venv/bin/funkwhale-manage migrate
+	ynh_hide_warnings ynh_exec_as_app $install_dir/venv/bin/funkwhale-manage collectstatic --no-input
 popd
 
-chmod 750 "$final_path"
-chmod -R o-rwx "$final_path"
-chown -R $app:www-data "$final_path"
+chmod 750 "$install_dir"
+chmod -R o-rwx "$install_dir"
+chown -R $app:www-data "$install_dir"
+
+
+if ynh_app_upgrading_from_version_before 2.0.1~ynh1
+then
+	ynh_hide_warnings ynh_exec_as_app $install_dir/venv/bin/funkwhale-manage fw media generate-thumbnails
+fi
+
+#=================================================
+# LOGROTATE
+#=================================================
+ynh_script_progression "Configuring logrotate to manage application logfiles"
+
+ynh_config_add_logrotate
+
+touch /var/log/$app/${app}-server.log
+touch /var/log/$app/${app}-worker.log
+touch /var/log/$app/${app}-beat.log
 
 #=================================================
 # SETUP SYSTEMD
 #=================================================
-ynh_script_progression --message="Upgrading systemd configuration..."
+ynh_script_progression "Upgrading systemd configuration..."
 
-ynh_add_config --template="../conf/funkwhale.target" --destination="/etc/systemd/system/$app.target"
+ynh_config_add --template="funkwhale.target" --destination="/etc/systemd/system/$app.target"
 
-# Create a dedicated systemd config
-ynh_add_systemd_config --service="${app}-server" --template="funkwhale-server.service"
-ynh_add_systemd_config --service="${app}-worker" --template="funkwhale-worker.service"
-ynh_add_systemd_config --service="${app}-beat"   --template="funkwhale-beat.service"
+ynh_config_add_systemd --service="${app}-server" --template="funkwhale-server.service"
+ynh_config_add_systemd --service="${app}-worker" --template="funkwhale-worker.service"
+ynh_config_add_systemd --service="${app}-beat"   --template="funkwhale-beat.service"
 
-#=================================================
-# GENERIC FINALIZATION
 #=================================================
 # INTEGRATE SERVICE IN YUNOHOST
 #=================================================
-ynh_script_progression --message="Integrating service in YunoHost..."
+ynh_script_progression "Integrating service in YunoHost..."
 
-yunohost service add "${app}-beat"
-yunohost service add "${app}-server"
-yunohost service add "${app}-worker"
+yunohost service add "${app}-beat" --description="${app} celery beat process" --log="/var/log/$app/${app}-beat.log"
+yunohost service add "${app}-server" --description="${app} application server" --log="/var/log/$app/${app}-server.log"
+yunohost service add "${app}-worker" --description="${app} celery worker" --log="/var/log/$app/${app}-worker.log"
 
 #=================================================
 # START SYSTEMD SERVICE
 #=================================================
-ynh_script_progression --message="Starting a systemd service..."
+ynh_script_progression "Starting $app's systemd service..."
 
 # Start a systemd service
-ynh_systemd_action --service_name="${app}-beat" --action="start" --log_path="systemd" --line_match="Started"
-ynh_systemd_action --service_name="${app}-server" --action="start" --log_path="systemd" --line_match="Application startup complete"
-ynh_systemd_action --service_name="${app}-worker" --action="start" --log_path="systemd" --line_match="ready"
+ynh_systemctl --service="${app}-beat" --action="start" --log_path="systemd"
+ynh_systemctl --service="${app}-server" --action="start" --log_path="systemd" --wait_until="Application startup complete"
+ynh_systemctl --service="${app}-worker" --action="start" --log_path="systemd" --wait_until="ready"
 
 #=================================================
 # UPGRADE FAIL2BAN
 #=================================================
-ynh_script_progression --message="Reconfiguring Fail2Ban..."
+ynh_script_progression "Reconfiguring Fail2Ban..."
 
-# Create a dedicated Fail2Ban config
-ynh_add_fail2ban_config --logpath="/var/log/nginx/$domain-access.log" --failregex="<HOST>.* \"POST /api/v1/token/ HTTP/1.1\" 400 68.*$" --max_retry=5
-
-#=================================================
-# RELOAD NGINX
-#=================================================
-ynh_script_progression --message="Reloading NGINX web server..."
-
-ynh_systemd_action --service_name=nginx --action=reload
+ynh_config_add_fail2ban --logpath="/var/log/nginx/$domain-access.log" --failregex="<HOST>.* \"POST /api/v2/users/login HTTP/\d.\d\" 40"
 
 #=================================================
 # END OF SCRIPT
 #=================================================
 
-ynh_script_progression --message="Upgrade of $app completed"
+ynh_script_progression "Upgrade of $app completed"

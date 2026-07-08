@@ -1,0 +1,90 @@
+packaging_format = 2
+
+id = "funkwhale"
+name = "Funkwhale"
+description.en = "Convivial and modern music server"
+description.gl = "Servidor de música moderno e amigable"
+description.ca = "Servidor de música modern i convivial"
+description.fr = "Serveur de musique moderne et convivial"
+
+version = "2.0.6~ynh6"
+
+maintainers = ["Thovi98"]
+
+[upstream]
+license = "AGPL-3.0-or-later"
+website = "https://funkwhale.audio/"
+demo = "https://demo.funkwhale.audio"
+admindoc = "https://docs.funkwhale.audio/admin/index.html"
+userdoc = "https://docs.funkwhale.audio/user/index.html"
+code = "https://dev.funkwhale.audio/funkwhale/funkwhale"
+fund = "https://next.funkwhale.audio/donate/"
+
+[integration]
+yunohost = ">= 12.1.39"
+helpers_version = "2.1"
+architectures = "all"
+multi_instance = true
+
+ldap = true
+sso = true
+
+disk = "50M"
+ram.build = "50M"
+ram.runtime = "50M"
+
+[install]
+    [install.domain]
+    type = "domain"
+
+    [install.init_main_permission]
+    help.en = "If enabled, Funkwhale will be accessible by Funkwhale for Android and by users without a YunoHost account. This can be changed later in the webadmin."
+    help.gl = "Se o activas, Funkwhale vai ser accesible para Funkwhale para Android e por usuarias sen unha conta YunoHost. Podes cambiar esto máis tarde nos axustes de administración."
+    help.ca = "Si ho habiliteu, Funkwhale serà accessible amb Funkwhale per Android i per usuaris sense un compte a YunoHost. Es pot canviar més tard en la web d'administració."
+    help.fr = "Si cette case est cochée, Funkwhale sera accessible par Funkwhale for Android et par les utilisateurs n’ayant pas de compte YunoHost. Vous pourrez changer cela dans la webadmin."
+    type = "group"
+    default = "visitors"
+
+    [install.admin]
+    type = "user"
+
+[resources]
+    [resources.sources]
+        [resources.sources.api]
+        # url = "http://dev.funkwhale.audio/funkwhale/funkwhale/-/jobs/artifacts/2.0.6/download?job=build_api"
+        url = "https://github.com/YunoHost-Apps/funkwhale_ynh/releases/download/2.0.6/api_2.0.6.zip"
+        sha256 = "8f3c69da89aeeddd6daae073a65400bb8f69dbbfd7ffe86bcf223d310f7c9c10"
+        in_subdir = true
+        extract   = true
+        format = "zip"
+
+        [resources.sources.front]
+        # url = "https://dev.funkwhale.audio/funkwhale/funkwhale/-/jobs/artifacts/2.0.6/download?job=build_front"
+        url = "https://github.com/YunoHost-Apps/funkwhale_ynh/releases/download/2.0.6/front_2.0.6.zip"
+        sha256 = "98e012000e777502a8136a7fe395815c6130716882542fcd00e9e897a6d447da"
+        in_subdir = true
+        extract   = true
+        format = "zip"
+
+    [resources.ports]
+
+    [resources.system_user]
+
+    [resources.install_dir]
+    group = "www-data:r-x"
+
+    [resources.data_dir]
+
+    [resources.permissions]
+    main.url = "/"
+
+    api.url = "/api"
+    api.allowed = "visitors"
+    api.show_tile = false
+    api.protected = true
+
+    [resources.apt]
+    packages = "build-essential, curl, ffmpeg, libjpeg-dev, libmagic-dev, libpq-dev, postgresql, postgresql-client, postgresql-contrib, python3-dev, libldap2-dev, libsasl2-dev, make, unzip, zlib1g-dev, libffi-dev, libssl-dev, libxml2-dev, libxslt1-dev, libjpeg-dev, python3-venv, git, redis-server"
+
+    [resources.database]
+    type = "postgresql"

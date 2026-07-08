@@ -1,255 +1,156 @@
 #!/bin/bash
 
-#=================================================
-# GENERIC START
-#=================================================
-# IMPORT GENERIC HELPERS
-#=================================================
 
-source _common.sh
 source /usr/share/yunohost/helpers
-
-#=================================================
-# MANAGE SCRIPT FAILURE
-#=================================================
-
-ynh_clean_setup () {
-	ynh_clean_check_starting
-}
-# Exit if an error occurs during the execution of the script
-ynh_abort_if_errors
 
 #=================================================
 # RETRIEVE ARGUMENTS FROM THE MANIFEST
 #=================================================
 
-domain=$YNH_APP_ARG_DOMAIN
-path_url="/"
-admin=$YNH_APP_ARG_ADMIN
-is_public=$YNH_APP_ARG_IS_PUBLIC
-
 admin_mail=$(ynh_user_get_info --username="$admin" --key="mail")
-
-app=$YNH_APP_INSTANCE_NAME
-
-#=================================================
-# CHECK IF THE APP CAN BE INSTALLED WITH THESE ARGS
-#=================================================
-ynh_script_progression --message="Validating installation parameters..."
-
-final_path=/var/www/$app
-test ! -e "$final_path" || ynh_die --message="This path already contains a folder"
-
-datadir=/home/yunohost.app/$app/data
-
-# Register (book) web path
-ynh_webpath_register --app=$app --domain=$domain --path_url=$path_url
-
-#=================================================
-# STORE SETTINGS FROM MANIFEST
-#=================================================
-ynh_script_progression --message="Storing installation settings..."
-
-ynh_app_setting_set --app=$app --key=domain --value=$domain
-ynh_app_setting_set --app=$app --key=path --value=$path_url
-ynh_app_setting_set --app=$app --key=admin --value=$admin
-
-#=================================================
-# STANDARD MODIFICATIONS
-#=================================================
-# FIND AND OPEN A PORT
-#=================================================
-ynh_script_progression --message="Finding an available port..."
-
-# Find an available port
-port=$(ynh_find_port --port=5000)
-ynh_app_setting_set --app=$app --key=port --value=$port
-
-#=================================================
-# INSTALL DEPENDENCIES
-#=================================================
-ynh_script_progression --message="Installing dependencies..."
-
-ynh_exec_warn_less ynh_install_app_dependencies $pkg_dependencies
-
-#=================================================
-# CREATE DEDICATED USER
-#=================================================
-ynh_script_progression --message="Configuring system user..."
-
-# Create a system user
-ynh_system_user_create --username=$app --home_dir=$final_path
-
-#=================================================
-# CREATE A POSTGRESQL DATABASE
-#=================================================
-ynh_script_progression --message="Creating a PostgreSQL database..."
-
-ynh_psql_test_if_first_run
-db_name=$(ynh_sanitize_dbid --db_name=$app)
-db_user=$db_name
-db_pwd=$(ynh_string_random)
-ynh_app_setting_set --app=$app --key=db_name --value=$db_name
-ynh_app_setting_set --app=$app --key=db_pwd --value=$db_pwd
-
-# Initialize database and store postgres password for upgrade
-ynh_psql_setup_db --db_user=$db_user --db_name=$db_name --db_pwd=$db_pwd
-
-#=================================================
-# DOWNLOAD, CHECK AND UNPACK SOURCE
-#=================================================
-ynh_script_progression --message="Setting up source files..."
-
-ynh_app_setting_set --app=$app --key=final_path --value=$final_path
-# Download, check integrity, uncompress and patch the source from app.src
-ynh_setup_source --dest_dir="$final_path/api" --source_id="api"
-ynh_setup_source --dest_dir="$final_path/front" --source_id="front"
-
-mkdir -p $final_path/config
-
-chmod 750 "$final_path"
-chmod -R o-rwx "$final_path"
-chown -R $app:www-data "$final_path"
-
-#=================================================
-# NGINX CONFIGURATION
-#=================================================
-ynh_script_progression --message="Configuring NGINX web server..."
-
-# Create a dedicated NGINX config
-ynh_add_nginx_config
-
-#=================================================
-# SPECIFIC SETUP
-#=================================================
-# CREATE DATA DIRECTORY
-#=================================================
-ynh_script_progression --message="Creating a data directory..."
-
-ynh_app_setting_set --app=$app --key=datadir --value=$datadir
-
-mkdir -p $datadir
-mkdir -p $datadir/{static,media,music}
-
-chmod 750 "$datadir"
-chmod -R o-rwx "$datadir"
-chown -R $app:www-data "$datadir"
-
-#=================================================
-# ADD A CONFIGURATION
-#=================================================
-ynh_script_progression --message="Adding a configuration file..."
 
 key=$(ynh_string_random --length=45 | base64)
 redis_db=$(ynh_redis_get_free_db)
 
-ynh_app_setting_set --app=$app --key=key --value=$key
-ynh_app_setting_set --app=$app --key=redis_db --value=$redis_db
+ynh_app_setting_set --key=key --value=$key
+ynh_app_setting_set --key=redis_db --value=$redis_db
 
-ynh_add_config --template="../conf/env.prod" --destination="$final_path/config/.env"
+#=================================================
+# PREPARE A POSTGRESQL DATABASE
+#=================================================
+ynh_script_progression "Configuring the PostgreSQL database..."
 
-chmod 400 "$final_path/config/.env"
-chown $app:$app "$final_path/config/.env"
+ynh_psql_db_shell <<< "ALTER USER $db_user WITH SUPERUSER;"
+ynh_psql_db_shell <<< "GRANT ALL PRIVILEGES ON DATABASE $db_name TO $db_user;"
+ynh_psql_db_shell <<< "CREATE EXTENSION IF NOT EXISTS unaccent;"
+ynh_psql_db_shell <<< "CREATE EXTENSION IF NOT EXISTS citext;"
+ynh_psql_db_shell <<< "ALTER USER $db_user WITH NOSUPERUSER;"
+
+#=================================================
+# DOWNLOAD, CHECK AND UNPACK SOURCE
+#=================================================
+ynh_script_progression "Setting up source files..."
+
+ynh_setup_source --dest_dir="$install_dir/api" --source_id="api"
+ynh_setup_source --dest_dir="$install_dir/front" --source_id="front"
+
+mkdir -p $install_dir/config
+
+#=================================================
+# NGINX CONFIGURATION
+#=================================================
+ynh_script_progression "Configuring NGINX web server..."
+
+ynh_config_add_nginx
+
+#=================================================
+# CREATE DATA DIRECTORY
+#=================================================
+ynh_script_progression "Creating a data directory..."
+
+mkdir -p $data_dir/data
+mkdir -p $data_dir/data/{static,media,music}
+
+chmod 750 "$data_dir"
+chmod -R o-rwx "$data_dir/"
+chown -R $app:www-data "$data_dir/"
+
+#=================================================
+# ADD A CONFIGURATION
+#=================================================
+ynh_script_progression "Adding $app's configuration..."
+
+ynh_config_add --template="env.prod" --destination="$install_dir/config/.env"
 
 #=================================================
 # SETUP SYSTEMD
 #=================================================
-ynh_script_progression --message="Configuring a systemd service..."
+ynh_script_progression "Configuring $app's systemd service..."
 
-ynh_add_config --template="../conf/funkwhale.target" --destination="/etc/systemd/system/$app.target"
+ynh_config_add --template="funkwhale.target" --destination="/etc/systemd/system/$app.target"
 
 # Create a dedicated systemd config
-ynh_add_systemd_config --service="${app}-server" --template="funkwhale-server.service"
-ynh_add_systemd_config --service="${app}-worker" --template="funkwhale-worker.service"
-ynh_add_systemd_config --service="${app}-beat"   --template="funkwhale-beat.service"
+ynh_config_add_systemd --service="${app}-server" --template="funkwhale-server.service"
+ynh_config_add_systemd --service="${app}-worker" --template="funkwhale-worker.service"
+ynh_config_add_systemd --service="${app}-beat"   --template="funkwhale-beat.service"
 
 #=================================================
 # INSTALL PYTHON DEPENDENCIES
 #=================================================
-ynh_script_progression --message="Installing Python dependencies..."
+ynh_script_progression "Installing Python dependencies..."
 
-pushd $final_path
-	python3 -m venv $final_path/virtualenv
-	source $final_path/virtualenv/bin/activate
-	pip install --upgrade pip
-	pip install --upgrade setuptools
-	ynh_exec_warn_less pip install wheel
-	# Workaround for error AttributeError: module 'lib' has no attribute 'X509_V_FLAG_CB_ISSUER_CHECK'
-	ynh_replace_string --match_string="pyOpenSSL~=20.0.1" --replace_string="pyOpenSSL~=21.0.0" --target_file="$final_path/api/requirements/base.txt"
-	ynh_exec_warn_less pip install -r api/requirements.txt
+if [ $YNH_ARCH == "armhf" ] || [ $YNH_ARCH == "armel" ]
+then
+# Install rustup is not already installed
+# We need this to be able to install cryptgraphy
+export PATH="$PATH:$install_dir/.cargo/bin:$install_dir/.local/bin:/usr/local/sbin"
+    if [ -e $install_dir/.rustup ]; then
+    ynh_exec_as_app PATH=$PATH rustup update
+    else
+    ynh_exec_as_app bash -c 'curl -sSf -L https://static.rust-lang.org/rustup.sh | sh -s -- -y --default-toolchain=stable --profile=minimal'
+    fi
+fi
+
+pushd $install_dir
+	ynh_exec_as_app python3 -m venv $install_dir/venv
+	ynh_hide_warnings ynh_exec_as_app $install_dir/venv/bin/pip install --upgrade pip wheel toml setuptools poetry-core
+	ynh_hide_warnings ynh_exec_as_app $install_dir/venv/bin/pip install --editable ./api --no-build-isolation
 popd
 
 #=================================================
 # BUILDING FUNKWHALE
 #=================================================
-ynh_script_progression --message="Building funkwhale..."
+ynh_script_progression "Building funkwhale..."
 
-pushd $final_path
-	source $final_path/virtualenv/bin/activate
+pushd $install_dir
+	ynh_hide_warnings ynh_exec_as_app $install_dir/venv/bin/funkwhale-manage migrate
 
-	# needed for enabling the 'unaccent' extension
-	ynh_psql_execute_as_root --sql="ALTER USER $db_user WITH SUPERUSER;" --database="$db_name"
-	ynh_exec_warn_less python api/manage.py migrate
-	ynh_psql_execute_as_root --sql="ALTER USER $db_user WITH NOSUPERUSER;" --database="$db_name"
-	echo "from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser('$admin', '$admin_mail', 'funkwhale') " | ynh_exec_warn_less python api/manage.py shell
-	echo "yes" | ynh_exec_warn_less python api/manage.py collectstatic
+	echo "from django.contrib.auth import get_user_model; User = get_user_model(); User.objects.create_superuser('$admin', '$admin_mail', 'funkwhale') " | ynh_hide_warnings $install_dir/venv/bin/python api/manage.py shell
+	echo "yes" | ynh_hide_warnings ynh_exec_as_app $install_dir/venv/bin/funkwhale-manage collectstatic --no-input
 popd
 
-chmod 750 "$final_path"
-chmod -R o-rwx "$final_path"
-chown -R $app:www-data "$final_path"
+chmod 750 "$install_dir"
+chmod -R o-rwx "$install_dir"
+chown -R $app:www-data "$install_dir"
 
 #=================================================
-# GENERIC FINALIZATION
+# LOGROTATE
+#=================================================
+ynh_script_progression "Configuring logrotate to manage application logfiles"
+
+ynh_config_add_logrotate
+
+touch /var/log/$app/${app}-server.log
+touch /var/log/$app/${app}-worker.log
+touch /var/log/$app/${app}-beat.log
+
 #=================================================
 # INTEGRATE SERVICE IN YUNOHOST
 #=================================================
-ynh_script_progression --message="Integrating service in YunoHost..."
+ynh_script_progression "Integrating service in YunoHost..."
 
-yunohost service add "${app}-beat"
-yunohost service add "${app}-server"
-yunohost service add "${app}-worker"
+yunohost service add "${app}-beat" --description="${app} celery beat process" --log="/var/log/$app/${app}-beat.log"
+yunohost service add "${app}-server" --description="${app} application server" --log="/var/log/$app/${app}-server.log"
+yunohost service add "${app}-worker" --description="${app} celery worker" --log="/var/log/$app/${app}-worker.log"
 
 #=================================================
 # START SYSTEMD SERVICE
 #=================================================
-ynh_script_progression --message="Starting a systemd service..."
+ynh_script_progression "Starting $app's systemd service..."
 
-# Start a systemd service
-ynh_systemd_action --service_name="${app}-beat" --action="start" --log_path="systemd" --line_match="Started"
-ynh_systemd_action --service_name="${app}-server" --action="start" --log_path="systemd" --line_match="Application startup complete"
-ynh_systemd_action --service_name="${app}-worker" --action="start" --log_path="systemd" --line_match="ready"
+ynh_systemctl --service="${app}-beat" --action="start" --log_path="systemd"
+ynh_systemctl --service="${app}-server" --action="start" --log_path="systemd" --wait_until="Application startup complete"
+ynh_systemctl --service="${app}-worker" --action="start" --log_path="systemd" --wait_until="ready"
 
 #=================================================
 # SETUP FAIL2BAN
 #=================================================
-ynh_script_progression --message="Configuring Fail2Ban..."
+ynh_script_progression "Configuring Fail2Ban..."
 
-# Create a dedicated Fail2Ban config
-ynh_add_fail2ban_config --logpath="/var/log/nginx/${domain}-access.log" --failregex="<HOST>.* \"POST /api/v1/token/ HTTP/1.1\" 400 68.*$" --max_retry=5
-
-#=================================================
-# SETUP SSOWAT
-#=================================================
-ynh_script_progression --message="Configuring permissions..."
-
-# Make app public if necessary
-if [ $is_public -eq 1 ]
-then
-	# Everyone can access the app.
-	# The "main" permission is automatically created before the install script.
-	ynh_permission_update --permission="main" --add="visitors"
-fi
-
-#=================================================
-# RELOAD NGINX
-#=================================================
-ynh_script_progression --message="Reloading NGINX web server..."
-
-ynh_systemd_action --service_name=nginx --action=reload
+ynh_config_add_fail2ban --logpath="/var/log/nginx/$domain-access.log" --failregex="<HOST>.* \"POST /api/v2/users/login HTTP/\d.\d\" 40"
 
 #=================================================
 # END OF SCRIPT
 #=================================================
 
-ynh_script_progression --message="Installation of $app completed"
+ynh_script_progression "Installation of $app completed"
